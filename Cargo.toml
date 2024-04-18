@@ -1,0 +1,20 @@
+[package]
+name = "npezza93_tree-sitter-tags"
+version = "0.21.1"
+description = "Library for extracting tag information"
+authors = [
+  "Max Brunsfeld <maxbrunsfeld@gmail.com>",
+  "Patrick Thomson <patrickt@github.com>",
+]
+readme = "README.md"
+keywords = ["incremental", "parsing", "syntax", "tagging"]
+categories = ["parsing", "text-editors"]
+
+[lib]
+crate-type = ["lib", "staticlib"]
+
+[dependencies]
+memchr = "2.7.2"
+regex = "1.10.4"
+thiserror = "1.0.58"
+tree-sitter = ">=0.20"
