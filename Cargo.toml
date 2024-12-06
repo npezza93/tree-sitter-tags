@@ -1,6 +1,6 @@
 [package]
 name = "npezza93_tree-sitter-tags"
-version = "0.21.1"
+version = "0.21.2"
 license-file = "LICENSE"
 description = "Library for extracting tag information"
 authors = [
