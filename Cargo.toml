@@ -15,7 +15,8 @@ categories = ["parsing", "text-editors"]
 crate-type = ["lib", "staticlib"]
 
 [dependencies]
-memchr = "2.7.2"
-regex = "1.10.4"
-thiserror = "1.0.58"
+memchr = "^2.7"
+regex = "^1.10"
+thiserror = "^1.0"
 tree-sitter = ">=0.20"
+streaming-iterator = "0.1.9"

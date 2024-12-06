@@ -1,9 +1,10 @@
 #![doc = include_str!("../README.md")]
 
-extern crate tree_sitter;
 extern crate memchr;
 extern crate regex;
+extern crate streaming_iterator;
 extern crate thiserror;
+extern crate tree_sitter;
 
 pub mod c_lib;
 
@@ -20,6 +21,7 @@ use std::{
 
 use memchr::memchr;
 use regex::Regex;
+use streaming_iterator::StreamingIterator;
 use thiserror::Error;
 use tree_sitter::{
     Language, LossyUtf8, Parser, Point, Query, QueryCursor, QueryError, QueryPredicateArg, Tree,
@@ -107,7 +109,7 @@ struct LocalScope<'a> {
 
 struct TagsIter<'a, I>
 where
-    I: Iterator<Item = tree_sitter::QueryMatch<'a, 'a>>,
+    I: StreamingIterator<Item = tree_sitter::QueryMatch<'a, 'a>>,
 {
     matches: I,
     _tree: Tree,
@@ -299,7 +301,7 @@ impl TagsContext {
         // The `matches` iterator borrows the `Tree`, which prevents it from being
         // moved. But the tree is really just a pointer, so it's actually ok to
         // move it.
-        let tree_ref = unsafe { mem::transmute::<_, &'static Tree>(&tree) };
+        let tree_ref = unsafe { mem::transmute::<&Tree, &'static Tree>(&tree) };
         let matches = self
             .cursor
             .matches(&config.query, tree_ref.root_node(), source);
@@ -326,7 +328,7 @@ impl TagsContext {
 
 impl<'a, I> Iterator for TagsIter<'a, I>
 where
-    I: Iterator<Item = tree_sitter::QueryMatch<'a, 'a>>,
+    I: StreamingIterator<Item = tree_sitter::QueryMatch<'a, 'a>>,
 {
     type Item = Result<Tag, Error>;
 
@@ -360,7 +362,8 @@ where
 
             // If there is another match, then compute its tag and add it to the
             // tag queue.
-            if let Some(mat) = self.matches.next() {
+             let source = &self.source;
+            if let Some(&ref mat) = self.matches.next() {
                 let pattern_info = &self.config.pattern_info[mat.pattern_index];
 
                 if mat.pattern_index < self.config.tags_pattern_index {
@@ -440,7 +443,7 @@ where
                                     if scope
                                         .local_defs
                                         .iter()
-                                        .any(|d| d.name == &self.source[name_range.clone()])
+                                        .any(|d| d.name == &source[name_range.clone()])
                                     {
                                         is_local = true;
                                         break;
@@ -497,7 +500,9 @@ where
 
                         let mut metadata = None;
                         if let Some(metadata_node) = metadata_node {
-                            if let Ok(content) = str::from_utf8(&self.source[metadata_node.byte_range()]) {
+                            if let Ok(content) =
+                                str::from_utf8(&self.source[metadata_node.byte_range()])
+                            {
                                 metadata = Some(content.to_string());
                             }
                         }
