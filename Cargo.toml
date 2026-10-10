@@ -1,6 +1,8 @@
 [package]
 name = "npezza93_tree-sitter-tags"
-version = "0.21.1"
+version = "0.22.0"
+edition = "2021"
+rust-version = "1.90"
 license-file = "LICENSE"
 description = "Library for extracting tag information"
 authors = [
@@ -15,8 +17,11 @@ categories = ["parsing", "text-editors"]
 crate-type = ["lib", "staticlib"]
 
 [dependencies]
-memchr = "^2.7"
-regex = "^1.10"
-thiserror = "^1.0"
-tree-sitter = ">=0.20"
+memchr = "2.8.3"
+regex = "1.13.1"
+thiserror = "2.0.21"
+tree-sitter = "0.27.1"
 streaming-iterator = "0.1.9"
+
+[dev-dependencies]
+tree-sitter-ruby = "0.23.1"

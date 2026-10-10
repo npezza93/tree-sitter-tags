@@ -13,7 +13,7 @@ use std::{
     collections::HashMap,
     ffi::{CStr, CString},
     mem,
-    ops::Range,
+    ops::{ControlFlow, Range},
     os::raw::c_char,
     str,
     sync::atomic::{AtomicUsize, Ordering},
@@ -24,7 +24,8 @@ use regex::Regex;
 use streaming_iterator::StreamingIterator;
 use thiserror::Error;
 use tree_sitter::{
-    Language, LossyUtf8, Parser, Point, Query, QueryCursor, QueryError, QueryPredicateArg, Tree,
+    Language, LossyUtf8, ParseOptions, Parser, Point, Query, QueryCursor, QueryError,
+    QueryPredicateArg, Tree,
 };
 
 const MAX_LINE_LEN: usize = 180;
@@ -208,7 +209,7 @@ impl TagsConfiguration {
                         && property
                             .value
                             .as_ref()
-                            .map_or(false, |v| v.as_ref() == "false")
+                            .is_some_and(|v| v.as_ref() == "false")
                     {
                         info.local_scope_inherits = false;
                     }
@@ -295,8 +296,20 @@ impl TagsContext {
             .set_language(&config.language)
             .map_err(|_| Error::InvalidLanguage)?;
         self.parser.reset();
-        unsafe { self.parser.set_cancellation_flag(cancellation_flag) };
-        let tree = self.parser.parse(source, None).ok_or(Error::Cancelled)?;
+        let tree = self
+            .parser
+            .parse_with_options(
+                &mut |offset, _| source.get(offset..).unwrap_or_default(),
+                None,
+                Some(ParseOptions::new().progress_callback(&mut |_| {
+                    if cancellation_flag.is_some_and(|flag| flag.load(Ordering::Relaxed) != 0) {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                })),
+            )
+            .ok_or(Error::Cancelled)?;
 
         // The `matches` iterator borrows the `Tree`, which prevents it from being
         // moved. But the tree is really just a pointer, so it's actually ok to
@@ -362,12 +375,12 @@ where
 
             // If there is another match, then compute its tag and add it to the
             // tag queue.
-             let source = &self.source;
-            if let Some(&ref mat) = self.matches.next() {
+            let source = &self.source;
+            if let Some(mat) = self.matches.next() {
                 let pattern_info = &self.config.pattern_info[mat.pattern_index];
 
                 if mat.pattern_index < self.config.tags_pattern_index {
-                    for capture in mat.captures {
+                    for capture in mat.captures() {
                         let index = Some(capture.index);
                         let range = capture.node.byte_range();
                         if index == self.config.local_scope_capture_index {
@@ -398,7 +411,7 @@ where
                 let mut docs_adjacent_node = None;
                 let mut is_ignored = false;
 
-                for capture in mat.captures {
+                for capture in mat.captures() {
                     let index = Some(capture.index);
 
                     if index == self.config.ignore_capture_index {
@@ -516,13 +529,10 @@ where
                         // reuse results from the previous tag.
                         let mut prev_utf16_column = 0;
                         let mut prev_utf8_byte = name_range.start - span.start.column;
-                        let line_info = self.prev_line_info.as_ref().and_then(|info| {
-                            if info.utf8_position.row == span.start.row {
-                                Some(info)
-                            } else {
-                                None
-                            }
-                        });
+                        let line_info = self
+                            .prev_line_info
+                            .as_ref()
+                            .filter(|info| info.utf8_position.row == span.start.row);
                         let line_range = if let Some(line_info) = line_info {
                             if line_info.utf8_position.column <= span.start.column {
                                 prev_utf8_byte = line_info.utf8_byte;
@@ -681,5 +691,100 @@ mod tests {
         let r = line_range(text, 12, Point::new(1, 0), 14);
         assert_eq!(r, 12..15);
         assert_eq!(str::from_utf8(&text[r]).unwrap_or(""), "bar");
+    }
+
+    fn ruby_config() -> TagsConfiguration {
+        TagsConfiguration::new(
+            tree_sitter_ruby::LANGUAGE.into(),
+            r#"
+            ((call method: (identifier) @metadata
+                   (argument_list (simple_symbol) @name)) @definition.macro)
+            (class name: (constant) @name) @definition.class
+            "#,
+            "",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn preserves_metadata_names_and_unicode_ranges() {
+        let config = ruby_config();
+        let mut context = TagsContext::new();
+        let source = "attr_reader :naïve\nhas_many :children\nclass Example; end\n".as_bytes();
+        let (tags, has_error) = context.generate_tags(&config, source, None).unwrap();
+        assert!(!has_error);
+        let tags = tags
+            .map(|tag| {
+                let tag = tag.unwrap();
+                (
+                    str::from_utf8(&source[tag.name_range.clone()])
+                        .unwrap()
+                        .to_owned(),
+                    tag.metadata,
+                    config.syntax_type_name(tag.syntax_type_id).to_owned(),
+                    tag.span.start.row,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            vec![
+                (
+                    ":naïve".into(),
+                    Some("attr_reader".into()),
+                    "macro".into(),
+                    0
+                ),
+                (
+                    ":children".into(),
+                    Some("has_many".into()),
+                    "macro".into(),
+                    1
+                ),
+                ("Example".into(), None, "class".into(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn cancels_parsing_and_reuses_context_without_a_flag() {
+        let config = ruby_config();
+        let mut context = TagsContext::new();
+        let source = "class Example; end\n".repeat(10_000);
+        let cancelled = AtomicUsize::new(1);
+        assert!(matches!(
+            context.generate_tags(&config, source.as_bytes(), Some(&cancelled)),
+            Err(Error::Cancelled)
+        ));
+
+        // The old flag is still set: a subsequent call must not retain it.
+        let (tags, has_error) = context
+            .generate_tags(&config, b"class Reused; end", None)
+            .unwrap();
+        assert!(!has_error);
+        assert_eq!(tags.collect::<Result<Vec<_>, _>>().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cancels_tag_iteration_and_reuses_context_after_reset() {
+        let config = ruby_config();
+        let mut context = TagsContext::new();
+        let source = "class Example; end\n".repeat(1_000);
+        let cancelled = AtomicUsize::new(0);
+        {
+            let (tags, has_error) = context
+                .generate_tags(&config, source.as_bytes(), Some(&cancelled))
+                .unwrap();
+            assert!(!has_error);
+            cancelled.store(1, Ordering::Relaxed);
+            assert!(tags
+                .into_iter()
+                .any(|tag| matches!(tag, Err(Error::Cancelled))));
+        }
+        cancelled.store(0, Ordering::Relaxed);
+        let (tags, _) = context
+            .generate_tags(&config, b"class Reused; end", Some(&cancelled))
+            .unwrap();
+        assert_eq!(tags.collect::<Result<Vec<_>, _>>().unwrap().len(), 1);
     }
 }
